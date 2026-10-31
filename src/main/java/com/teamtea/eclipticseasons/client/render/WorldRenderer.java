@@ -13,6 +13,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.PostChain;
 import net.minecraft.client.renderer.PostPass;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
@@ -32,74 +33,64 @@ import net.neoforged.neoforge.client.event.ViewportEvent;
 import java.util.ArrayList;
 
 public class WorldRenderer {
-    public static long reMainTick = 0;
+    private static final ResourceLocation HEAT_STROKE_BLUR = EclipticSeasons.rl("shaders/post/box_blur.json");
+    // Same timing and strength as before: 0 -> 1 over 10 ticks, RadiusMultiplier peaks at 0.3.
+    private static final float BLUR_FADE_STEP = 0.1f;
+    private static final float BLUR_MAX_RADIUS_MULTIPLIER = 0.3f;
 
-    private static float getProgress(boolean fadeIn) {
-        return Math.min(fadeIn ? (1 - reMainTick / 100f) : reMainTick / 100f, 1);
-    }
-
-    public static final int NONE_BLUR = 1;
-    public static final int ON_BLUR = 2;
-    public static final int TO_BLUR = 3;
-    public static final int CLEAR_BLUR = 3;
-
-    public static int oldBlurStatus = NONE_BLUR;
+    // The post chain we loaded, or null when it is not (or no longer) the active effect.
+    private static PostChain blurChain = null;
+    private static boolean blurLoadFailed = false;
+    private static float blurLevel = 0f;
+    private static float appliedBlurLevel = -1f;
 
     public static void applyEffect(GameRenderer gameRenderer, LocalPlayer player) {
         if (player == null) return;
 
-        if (Minecraft.getInstance().isPaused()) {
-            if (oldBlurStatus == ON_BLUR || reMainTick > 0) {
-                gameRenderer.shutdownEffect();
-                oldBlurStatus = NONE_BLUR;
-                reMainTick = 0;
-                updateUniform("RadiusMultiplier", 0f);
-            }
-            return;
-        }
+        // Keep the current blur while paused. Tearing it down here meant rebuilding the post chain on resume.
+        if (Minecraft.getInstance().isPaused()) return;
 
+        boolean hasEffect = false;
         if (CommonConfig.Temperature.heatStroke.get()) {
-            // var holder = BuiltInRegistries.MOB_EFFECT.getHolder(EclipticSeasons.EffectRegistry.Effects.HEAT_STROKE).get();
-            boolean hasEffect = false;
             for (var activeEffect : player.getActiveEffectsMap().keySet()) {
                 if (activeEffect.is(EffectRegistry.Effects.HEAT_STROKE)) {
                     hasEffect = true;
                     break;
                 }
             }
-            int blurStatus = hasEffect ? ON_BLUR : NONE_BLUR;
-            if (blurStatus != oldBlurStatus) {
-                if (blurStatus == ON_BLUR) {
-                    {
+        }
+        if (!hasEffect) blurLoadFailed = false;
 
-                        // 我们写的shader好像有问题？
-                        gameRenderer.loadEffect(EclipticSeasons.rl("shaders/post/box_blur.json"));
-//                        gameRenderer.loadEffect(ResourceLocation.withDefaultNamespace("shaders/post/blur.json"));
-                    }
-                }
+        PostChain current = gameRenderer.currentEffect();
+        if (blurChain != null && current != blurChain) {
+            // Closed or replaced elsewhere (F5, respawn/dimension change, resource reload, another mod's effect).
+            blurChain = null;
+        }
 
-                if (reMainTick > 0) {
-                    reMainTick -= 10;
-                } else reMainTick = 100;
+        // Load the post chain only once per activation. It used to be reloaded on every tick of the fade-in
+        // (~11 times, each compiling 6 shader passes and allocating a framebuffer), which caused the stutter.
+        // Never replace a post effect that someone else has active.
+        if (hasEffect && blurChain == null && current == null && !blurLoadFailed) {
+            gameRenderer.loadEffect(HEAT_STROKE_BLUR);
+            blurChain = gameRenderer.currentEffect();
+            blurLoadFailed = blurChain == null;
+            appliedBlurLevel = -1f;
+        }
 
-                float progress = getProgress(blurStatus == ON_BLUR) * 0.03f;
-                // if (progress != prevProgress)
-                {
-                    // prevProgress = progress;
-                    // 用于mc原版blur
-                    progress *= 10f;
+        blurLevel = hasEffect
+                ? Math.min(blurLevel + BLUR_FADE_STEP, 1f)
+                : Math.max(blurLevel - BLUR_FADE_STEP, 0f);
 
-                    updateUniform("RadiusMultiplier", progress);
-                }
-                // EclipticSeasons.logger(reMainTick, progress, blurStatus, oldBlurStatus);
-                if (reMainTick <= 0) {
-                    oldBlurStatus = blurStatus;
-                    if (oldBlurStatus == NONE_BLUR) {
-                        gameRenderer.shutdownEffect();
-                    }
-                    reMainTick = 0;
-                }
-            }
+        if (blurChain == null) return;
+
+        if (blurLevel != appliedBlurLevel) {
+            appliedBlurLevel = blurLevel;
+            updateUniform("RadiusMultiplier", blurLevel * BLUR_MAX_RADIUS_MULTIPLIER);
+        }
+
+        if (!hasEffect && blurLevel <= 0f) {
+            gameRenderer.shutdownEffect();
+            blurChain = null;
         }
     }
 

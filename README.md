@@ -1,5 +1,7 @@
 # [Ecliptic Seasons](https://legacy.curseforge.com/minecraft/mc-mods/ecliptic-seasons)
 
+> **Unofficial fork.** Modified from [TeamTeaMC/Ecliptic-Seasons](https://github.com/TeamTeaMC/Ecliptic-Seasons) 0.15.0-rc-3 (NeoForge 1.21.1) to fix the stutter when the Heatstroke blur starts. Not affiliated with or endorsed by the original authors. Licensed the same as upstream (see below).
+
 ![Ecliptic Seasons](https://github.com/user-attachments/assets/549d6626-d78e-4901-8b96-f420a6c2d3ea)
 
 Ecliptic Seasons is a seasonal environment mod inspired by the traditional 24 Solar Terms, bringing dynamic seasons,

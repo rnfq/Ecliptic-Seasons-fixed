@@ -1,5 +1,8 @@
 package com.teamtea.eclipticseasons.client.render;
 
+import com.google.gson.JsonSyntaxException;
+import com.mojang.blaze3d.platform.Window;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.teamtea.eclipticseasons.EclipticSeasons;
 import com.teamtea.eclipticseasons.common.core.map.MapChecker;
 import com.teamtea.eclipticseasons.common.registry.EffectRegistry;
@@ -14,7 +17,6 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.PostChain;
-import net.minecraft.client.renderer.PostPass;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.resources.ResourceLocation;
@@ -30,6 +32,7 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.FogType;
 import net.neoforged.neoforge.client.event.ViewportEvent;
 
+import java.io.IOException;
 import java.util.ArrayList;
 
 public class WorldRenderer {
@@ -38,71 +41,85 @@ public class WorldRenderer {
     private static final float BLUR_FADE_STEP = 0.1f;
     private static final float BLUR_MAX_RADIUS_MULTIPLIER = 0.3f;
 
-    // The post chain we loaded, or null when it is not (or no longer) the active effect.
+    // Our own post chain, built once and kept for the whole session. It is never put into
+    // GameRenderer#postEffect: we draw it ourselves (renderHeatStrokeBlur), so other post effects
+    // (spectator shaders, F5, other mods) can't block, close or replace it.
+    // Upstream reloaded GameRenderer's effect on every tick of the fade-in (~11 times, each linking
+    // 6 shader programs and allocating a framebuffer), which caused the stutter.
     private static PostChain blurChain = null;
     private static boolean blurLoadFailed = false;
+    private static int blurWidth = -1;
+    private static int blurHeight = -1;
+    private static boolean hadEffect = false;
     private static float blurLevel = 0f;
     private static float appliedBlurLevel = -1f;
 
     public static void applyEffect(GameRenderer gameRenderer, LocalPlayer player) {
-        if (player == null) return;
+        if (player == null || !CommonConfig.Temperature.heatStroke.get()) {
+            hadEffect = false;
+            blurLevel = 0f;
+            return;
+        }
 
-        // Keep the current blur while paused. Tearing it down here meant rebuilding the post chain on resume.
+        // Build it on the first tick in a world instead of when the effect is gained.
+        if (blurChain == null && !blurLoadFailed) loadBlurChain();
+
+        // Freeze the fade while paused.
         if (Minecraft.getInstance().isPaused()) return;
 
         boolean hasEffect = false;
-        if (CommonConfig.Temperature.heatStroke.get()) {
-            for (var activeEffect : player.getActiveEffectsMap().keySet()) {
-                if (activeEffect.is(EffectRegistry.Effects.HEAT_STROKE)) {
-                    hasEffect = true;
-                    break;
-                }
+        for (var activeEffect : player.getActiveEffectsMap().keySet()) {
+            if (activeEffect.is(EffectRegistry.Effects.HEAT_STROKE)) {
+                hasEffect = true;
+                break;
             }
         }
-        if (!hasEffect) blurLoadFailed = false;
-
-        PostChain current = gameRenderer.currentEffect();
-        if (blurChain != null && current != blurChain) {
-            // Closed or replaced elsewhere (F5, respawn/dimension change, resource reload, another mod's effect).
-            blurChain = null;
+        if (hasEffect && !hadEffect) {
+            PostChain current = gameRenderer.currentEffect();
+            EclipticSeasons.LOGGER.debug("Heatstroke blur on (chain ready: {}, vanilla post effect: {})",
+                    blurChain != null, current == null ? "none" : current.getName());
         }
-
-        // Load the post chain only once per activation. It used to be reloaded on every tick of the fade-in
-        // (~11 times, each compiling 6 shader passes and allocating a framebuffer), which caused the stutter.
-        // Never replace a post effect that someone else has active.
-        if (hasEffect && blurChain == null && current == null && !blurLoadFailed) {
-            gameRenderer.loadEffect(HEAT_STROKE_BLUR);
-            blurChain = gameRenderer.currentEffect();
-            blurLoadFailed = blurChain == null;
-            appliedBlurLevel = -1f;
-        }
+        hadEffect = hasEffect;
 
         blurLevel = hasEffect
                 ? Math.min(blurLevel + BLUR_FADE_STEP, 1f)
                 : Math.max(blurLevel - BLUR_FADE_STEP, 0f);
 
-        if (blurChain == null) return;
-
-        if (blurLevel != appliedBlurLevel) {
+        if (blurChain != null && blurLevel != appliedBlurLevel) {
             appliedBlurLevel = blurLevel;
-            updateUniform("RadiusMultiplier", blurLevel * BLUR_MAX_RADIUS_MULTIPLIER);
-        }
-
-        if (!hasEffect && blurLevel <= 0f) {
-            gameRenderer.shutdownEffect();
-            blurChain = null;
+            blurChain.setUniform("RadiusMultiplier", blurLevel * BLUR_MAX_RADIUS_MULTIPLIER);
         }
     }
 
-    public static void updateUniform(String name, float value) {
-        var postChain = Minecraft.getInstance().gameRenderer.currentEffect();
-        if (postChain != null)
-            for (PostPass postPass : postChain.passes) {
-                var uniform = postPass.getEffect().getUniform(name);
-                if (uniform != null) {
-                    uniform.set(value);
-                }
-            }
+    private static void loadBlurChain() {
+        Minecraft mc = Minecraft.getInstance();
+        try {
+            blurChain = new PostChain(mc.getTextureManager(), mc.getResourceManager(), mc.getMainRenderTarget(), HEAT_STROKE_BLUR);
+            blurWidth = -1;
+            appliedBlurLevel = -1f;
+        } catch (IOException | JsonSyntaxException e) {
+            blurLoadFailed = true;
+            EclipticSeasons.LOGGER.warn("Failed to load heatstroke blur {}", HEAT_STROKE_BLUR, e);
+        }
+    }
+
+    // Called from RenderGuiEvent.Pre, i.e. after the world (and any vanilla post effect) and before the HUD.
+    // State handling mirrors vanilla's menu blur in Screen#renderBlurredBackground.
+    public static void renderHeatStrokeBlur(float partialTick) {
+        if (blurChain == null || blurLevel <= 0f) return;
+
+        Window window = Minecraft.getInstance().getWindow();
+        if (window.getWidth() != blurWidth || window.getHeight() != blurHeight) {
+            blurWidth = window.getWidth();
+            blurHeight = window.getHeight();
+            blurChain.resize(blurWidth, blurHeight);
+        }
+
+        RenderSystem.disableDepthTest();
+        blurChain.process(partialTick);
+        Minecraft.getInstance().getMainRenderTarget().bindWrite(false);
+        // Gui#render enables depth test right before RenderGuiEvent.Pre.
+        RenderSystem.enableDepthTest();
     }
 
 

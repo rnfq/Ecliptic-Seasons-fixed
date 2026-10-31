@@ -66,6 +66,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.*;
@@ -85,13 +86,17 @@ public final class ClientEventHandler {
 
     @SubscribeEvent
     public static void onRenderTick(ClientTickEvent.Post event) {
-        if (Minecraft.getInstance().player != null) {
-            WorldRenderer.applyEffect(Minecraft.getInstance().gameRenderer, Minecraft.getInstance().player);
-        }
+        // Also called without a player so the heatstroke blur state resets when leaving a world.
+        WorldRenderer.applyEffect(Minecraft.getInstance().gameRenderer, Minecraft.getInstance().player);
         if (BiomeColorsHandler.needRefresh) {
             BiomeColorsHandler.reloadColors();
         }
 
+    }
+
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onRenderGuiPre(RenderGuiEvent.Pre event) {
+        WorldRenderer.renderHeatStrokeBlur(event.getPartialTick().getGameTimeDeltaTicks());
     }
 
     @SubscribeEvent
